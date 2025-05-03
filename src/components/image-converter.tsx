@@ -10,7 +10,8 @@ import { useToast } from '@/hooks/use-toast';
 // import imageCompression from 'browser-image-compression';
 import { Loader2 } from 'lucide-react';
 
-type OutputFormat = 'jpeg' | 'png' | 'webp';
+// Add 'heic' to the possible output formats
+type OutputFormat = 'jpeg' | 'png' | 'webp' | 'heic';
 
 const ImageConverter: React.FC = () => {
   const [file, setFile] = useState<File | null>(null);
@@ -28,8 +29,8 @@ const ImageConverter: React.FC = () => {
     // Basic check for HEIC type, although MIME type might be ambiguous
     if (acceptedFile.type === 'image/heic' || acceptedFile.type === 'image/heif' || acceptedFile.name.toLowerCase().endsWith('.heic') || acceptedFile.name.toLowerCase().endsWith('.heif')) {
         toast({
-            title: 'HEIC/HEIF Detected',
-            description: 'Browser support for HEIC/HEIF is limited. Conversion may fail.',
+            title: 'HEIC/HEIF Input Detected',
+            description: 'Browser support for decoding HEIC/HEIF is limited. Conversion may fail.',
             variant: 'default', // Use default variant for informational messages
         });
     }
@@ -44,6 +45,18 @@ const ImageConverter: React.FC = () => {
     if (!isClient) return;
 
     setIsProcessing(true);
+
+    // Check if the selected output format is HEIC
+    if (outputFormat === 'heic') {
+        toast({
+            title: 'Conversion Not Supported',
+            description: 'Direct conversion to HEIC format in the browser is not currently supported by this tool.',
+            variant: 'destructive', // Use destructive variant for unsupported features
+        });
+        setIsProcessing(false); // Stop processing indicator
+        return; // Exit the function
+    }
+
 
     try {
       // Use createImageBitmap which has broader support for decoding various formats, including HEIC in some browsers (like Safari)
@@ -85,6 +98,7 @@ const ImageConverter: React.FC = () => {
           mimeType = 'image/webp';
           quality = 0.92; // Default quality for WebP
           break;
+        // HEIC case is handled above and will not reach here
         case 'jpeg':
         default:
           mimeType = 'image/jpeg';
@@ -167,8 +181,8 @@ const ImageConverter: React.FC = () => {
           'image/webp': ['.webp'],
           'image/gif': ['.gif'],
           'image/bmp': ['.bmp'],
-          'image/heic': ['.heic'], // Add HEIC
-          'image/heif': ['.heif'], // Add HEIF
+          'image/heic': ['.heic'],
+          'image/heif': ['.heif'],
         }}
         label="Drag 'n' drop an image (JPG, PNG, WEBP, GIF, BMP, HEIC), or click to select"
       />
@@ -189,11 +203,16 @@ const ImageConverter: React.FC = () => {
                 <SelectItem value="jpeg">JPEG</SelectItem>
                 <SelectItem value="png">PNG</SelectItem>
                 <SelectItem value="webp">WebP</SelectItem>
+                {/* Add HEIC option */}
+                <SelectItem value="heic">HEIC (Not Supported)</SelectItem>
               </SelectContent>
             </Select>
+             {outputFormat === 'heic' && (
+                 <p className="text-xs text-destructive mt-1">Conversion to HEIC is not supported in the browser.</p>
+             )}
           </div>
 
-          <Button onClick={handleConvert} disabled={isProcessing || !file}>
+          <Button onClick={handleConvert} disabled={isProcessing || !file || outputFormat === 'heic'}>
             {isProcessing ? (
               <>
                 <Loader2 className="mr-2 h-4 w-4 animate-spin" />
