@@ -104,7 +104,10 @@ const PdfEditor: React.FC = () => {
     setPdfDoc(null);
     try {
       const arrayBuffer = await inputFile.arrayBuffer();
-      const loadedPdfDoc = await PDFDocument.load(arrayBuffer);
+      const loadedPdfDoc = await PDFDocument.load(arrayBuffer, {
+          // Important: Retain page numbers in tags for potential lookup later, though we aim to avoid relying on it heavily
+          updateMetadata: false,
+      });
       setPdfDoc(loadedPdfDoc); // Store the modifiable pdf-lib document
 
       const pageCount = loadedPdfDoc.getPageCount();
@@ -177,117 +180,72 @@ const PdfEditor: React.FC = () => {
     };
 
   const deleteSelectedPages = async () => {
-    if (!pdfDoc) return;
-    // Get the *current* indices to remove from the UI state array
-    const selectedCurrentIndices = getSelectedCurrentIndices().sort((a, b) => b - a); // Sort desc for UI state removal
+      if (!pdfDoc) return;
+      // Get the *current* indices to remove from the UI state array
+      const selectedCurrentIndices = getSelectedCurrentIndices().sort((a, b) => b - a); // Sort desc for UI state removal
 
-    if (selectedCurrentIndices.length === 0) {
-      toast({ title: 'Info', description: 'No pages selected for deletion.' });
-      return;
-    }
-    if (selectedCurrentIndices.length === pages.length) { // Check against current pages array length
-       toast({ title: 'Error', description: 'Cannot delete all pages.', variant: 'destructive' });
-       return;
-    }
+      if (selectedCurrentIndices.length === 0) {
+        toast({ title: 'Info', description: 'No pages selected for deletion.' });
+        return;
+      }
+      if (selectedCurrentIndices.length === pages.length) { // Check against current pages array length
+         toast({ title: 'Error', description: 'Cannot delete all pages.', variant: 'destructive' });
+         return;
+      }
 
-    setIsProcessing(true);
-    try {
-       // Identify original indices to remove from the pdfDoc state
-       const originalIndicesToRemove = selectedCurrentIndices.map(idx => pages[idx].id).sort((a, b) => b - a);
+      setIsProcessing(true);
+      try {
+          // Update UI state first by filtering based on current index
+          const updatedPages = pages.filter((_, index) => !selectedCurrentIndices.includes(index))
+                                 .map((page) => ({ ...page, selected: false })); // Deselect after action
+          setPages(updatedPages);
 
-       // Remove pages from the pdfDoc based on their *original index*.
-       // Need to map original index back to the current index within pdfDoc as it changes.
-        const currentPdfIndices = pdfDoc.getPageIndices();
-        originalIndicesToRemove.forEach(originalIndex => {
-             // Find the page in pdfDoc that *currently* corresponds to this original index
-             // This requires careful tracking if pdfDoc state itself isn't rebuilt on each op
-             // A safer approach might be to rebuild pdfDoc on save, or find a reliable page identifier in pdf-lib
-             // For now, assuming direct index removal works if done carefully (desc order)
-             // or that pdf-lib handles index shifts internally (which it might not reliably)
-             // --- Let's try removing by direct index lookup based on current state ---
-             // Re-evaluate this if issues arise with complex reordering/deletion patterns.
-             const pageIndexInDoc = pdfDoc.getPageIndices().findIndex(docIdx => {
-                 const page = pdfDoc.getPage(docIdx);
-                 // Heuristic: Check if a page has a specific property or ref matching the original page.
-                 // This is brittle. A more robust way would be needed for complex scenarios.
-                 // Simplest: Assume the original page number tag is still somewhat reliable *if*
-                 // we look it up fresh each time.
-                 return (page.ref.tag?.pageNumber ?? 0) - 1 === originalIndex;
-             });
+          // We don't need to modify pdfDoc directly here.
+          // The saveChanges function rebuilds the PDF based on the final `pages` state.
 
-             if (pageIndexInDoc !== -1) {
-                 try {
-                    pdfDoc.removePage(pageIndexInDoc);
-                 } catch (removeError) {
-                     console.warn(`Could not remove page with original index ${originalIndex} (current doc index ${pageIndexInDoc}):`, removeError);
-                     // Potentially try alternative lookup or skip
-                 }
-             } else {
-                  console.warn(`Page with original index ${originalIndex} not found in current pdfDoc state for removal.`);
-             }
-        });
-
-
-      // Update UI state by filtering based on current index
-      const updatedPages = pages.filter((_, index) => !selectedCurrentIndices.includes(index))
-                               .map((page) => ({ ...page, selected: false })); // Deselect after action
-
-       setPages(updatedPages);
-
-
-      toast({ title: 'Success', description: `${selectedCurrentIndices.length} page(s) deleted.` });
-    } catch (error) {
-      console.error('Error deleting pages:', error);
-      toast({ title: 'Error', description: 'Failed to delete pages.', variant: 'destructive' });
-       // Consider reloading the PDF state from the original file if complex errors occur
-    } finally {
-      setIsProcessing(false);
-    }
-  };
+          toast({ title: 'Success', description: `${selectedCurrentIndices.length} page(s) marked for deletion. Save changes to finalize.` });
+      } catch (error) {
+        console.error('Error marking pages for deletion:', error);
+        toast({ title: 'Error', description: 'Failed to mark pages for deletion.', variant: 'destructive' });
+         // Consider reloading the PDF state from the original file if complex errors occur
+      } finally {
+        setIsProcessing(false);
+      }
+    };
 
   const rotateSelectedPages = async (angle: number) => {
-    if (!pdfDoc) return;
-    const selectedCurrentIndices = getSelectedCurrentIndices();
+      if (!pdfDoc) return;
+      const selectedCurrentIndices = getSelectedCurrentIndices();
 
-    if (selectedCurrentIndices.length === 0) {
-      toast({ title: 'Info', description: 'No pages selected for rotation.' });
-      return;
-    }
+      if (selectedCurrentIndices.length === 0) {
+        toast({ title: 'Info', description: 'No pages selected for rotation.' });
+        return;
+      }
 
-    setIsProcessing(true);
-    try {
-      const updatedPagesState = [...pages]; // Create a mutable copy of the pages state
+      setIsProcessing(true);
+      try {
+        const updatedPagesState = [...pages]; // Create a mutable copy of the pages state
 
-      selectedCurrentIndices.forEach(index => {
-        const originalIndex = pages[index].id;
-        // Find the page in the current document state by original index (using the potentially brittle lookup)
-         const pageIndexInDoc = pdfDoc.getPageIndices().findIndex(docIdx => (pdfDoc.getPage(docIdx).ref.tag?.pageNumber ?? 0) - 1 === originalIndex);
+        selectedCurrentIndices.forEach(index => {
+          const pageInfo = updatedPagesState[index];
+          const currentRotation = pageInfo.rotation;
+          const newRotation = (currentRotation + angle) % 360;
 
-        if(pageIndexInDoc === -1) {
-            console.warn(`Page with original index ${originalIndex} not found in pdfDoc for rotation.`);
-            return; // Skip if page not found
-        }
+          // Update the rotation in our UI state
+          updatedPagesState[index] = { ...pageInfo, rotation: newRotation, selected: false };
+        });
 
-        const page = pdfDoc.getPage(pageIndexInDoc);
-        const currentRotation = page.getRotation().angle;
-        const newRotation = (currentRotation + angle) % 360;
-        page.setRotation(degrees(newRotation));
+         setPages(updatedPagesState); // Update UI state
+         toast({ title: 'Success', description: `Selected page(s) rotation updated. Save changes to finalize.` });
+         // We don't need to modify pdfDoc directly. SaveChanges handles it.
 
-        // Update the rotation in our UI state as well
-        updatedPagesState[index] = { ...updatedPagesState[index], rotation: newRotation, selected: false };
-      });
-
-       setPages(updatedPagesState); // Update UI state
-       toast({ title: 'Success', description: `Selected page(s) rotated ${angle} degrees.` });
-       // No preview refresh needed unless using canvas previews
-
-    } catch (error) {
-      console.error('Error rotating pages:', error);
-      toast({ title: 'Error', description: 'Failed to rotate pages.', variant: 'destructive' });
-    } finally {
-      setIsProcessing(false);
-    }
-  };
+      } catch (error) {
+        console.error('Error updating rotation state:', error);
+        toast({ title: 'Error', description: 'Failed to update rotation state.', variant: 'destructive' });
+      } finally {
+        setIsProcessing(false);
+      }
+    };
 
  const movePage = (index: number, direction: 'left' | 'right') => {
     if ((direction === 'left' && index === 0) || (direction === 'right' && index === pages.length - 1)) {
@@ -307,7 +265,15 @@ const PdfEditor: React.FC = () => {
 
 
   const saveChanges = async () => {
-    if (!pdfDoc || !file) return;
+    // Use the original file, not the intermediate pdfDoc state
+    if (!file) {
+        toast({ title: 'Error', description: 'Original PDF file is missing.', variant: 'destructive' });
+        return;
+    }
+    if (pages.length === 0) {
+       toast({ title: 'Error', description: 'No pages remaining to save.', variant: 'destructive' });
+       return;
+    }
     if(isCropping) {
         toast({ title: 'Info', description: 'Please finish or cancel cropping before saving.' });
         return;
@@ -323,6 +289,12 @@ const PdfEditor: React.FC = () => {
        // Iterate through the current UI `pages` state array, which reflects the desired order and modifications.
        for (const pageInfo of pages) {
          const originalIndex = pageInfo.id; // The original 0-based index of this page
+
+         // Check if the original index exists in the original document
+         if (originalIndex < 0 || originalIndex >= originalPdfDoc.getPageCount()) {
+             console.warn(`Skipping page with invalid original index: ${originalIndex}`);
+             continue; // Skip this page if its original index is out of bounds
+         }
 
          // Copy the page *from the original* document based on its original index.
          // This ensures we get the pristine version before any modifications in this session.
@@ -340,16 +312,17 @@ const PdfEditor: React.FC = () => {
                  pageInfo.cropBox.height
              );
          }
-         // else {
-         // Ensure MediaBox is set correctly (usually inherited during copy, but good practice)
-         // const originalPage = originalPdfDoc.getPage(originalIndex);
-         // const mediaBox = originalPage.getMediaBox();
-         // copiedPage.setMediaBox(mediaBox.x, mediaBox.y, mediaBox.width, mediaBox.height);
-         //}
+         // No 'else' needed here; if no cropBox in state, the original cropBox/mediaBox is retained from the copy.
 
          // Add the modified, copied page to the new document.
          // The order of addition dictates the final order in the saved PDF.
          newPdfDoc.addPage(copiedPage);
+       }
+
+       if (newPdfDoc.getPageCount() === 0) {
+          toast({ title: 'Error', description: 'Cannot save an empty PDF.', variant: 'destructive' });
+          setIsProcessing(false);
+          return;
        }
 
       const pdfBytes = await newPdfDoc.save({ useObjectStreams: false }); // Disable object streams for better compatibility/potentially smaller size sometimes
@@ -394,7 +367,24 @@ const PdfEditor: React.FC = () => {
 
      const index = selectedCurrentIndices[0]; // Current UI index
      const pageInfo = pages[index];
+
+     // Additional check: Ensure pageInfo exists for the selected index
+      if (!pageInfo) {
+         console.error(`Page info not found for UI index ${index}`);
+         toast({ title: 'Error', description: 'Could not retrieve page information.', variant: 'destructive' });
+         return;
+      }
+
+
      const originalIndex = pageInfo.id; // Original 0-based PDF index
+
+     // Add another check: Validate originalIndex before rendering
+     if (typeof originalIndex !== 'number' || originalIndex < 0) {
+         console.error(`Invalid original index (${originalIndex}) for UI index ${index}`);
+         toast({ title: 'Error', description: 'Invalid page index detected.', variant: 'destructive' });
+         return;
+      }
+
 
      setIsRenderingCropPreview(true);
      setCropError(null); // Reset error
@@ -421,7 +411,7 @@ const PdfEditor: React.FC = () => {
 
      } catch(error) {
         console.error("Error rendering page for cropping:", error);
-        toast({ title: 'Error', description: 'Could not render page for cropping.', variant: 'destructive' });
+        toast({ title: 'Error', description: `Could not render page for cropping. Page index: ${originalIndex + 1}. ${error instanceof Error ? error.message : ''}`, variant: 'destructive' });
         setIsCropping(false); // Close dialog on error
         setCropError('Could not render page.');
      } finally {
@@ -455,58 +445,56 @@ const PdfEditor: React.FC = () => {
       setCompletedCrop(undefined); // Ensure completedCrop is reset if image reloads
     };
 
-  const applyCrop = async () => {
-    // Apply crop uses the `pdfDoc` state object and the `pages` UI state array
-    if (!completedCrop || !pdfDoc || !croppingPageInfo || !imgRef.current) {
-      toast({ title: 'Error', description: 'Cannot apply crop. Missing data.', variant: 'destructive' });
-      return;
-    }
+  const applyCrop = () => {
+      // This function now *only* updates the UI state (`pages`).
+      // The actual PDF modification happens in `saveChanges`.
+      if (!completedCrop || !croppingPageInfo || !imgRef.current) {
+          toast({ title: 'Error', description: 'Cannot apply crop. Missing data.', variant: 'destructive' });
+          return;
+      }
 
-    setIsProcessing(true); // Indicate processing within the dialog
-    try {
-        // Find the corresponding page *object* in the current `pdfDoc` state
-        // using its original index for lookup (assuming `ref.tag.pageNumber` is reliable enough here)
-        const pageIndexInDoc = pdfDoc.getPageIndices().findIndex(docIdx => (pdfDoc.getPage(docIdx).ref.tag?.pageNumber ?? 0) - 1 === croppingPageInfo.originalIndex);
+      setIsProcessing(true); // Indicate processing within the dialog
+      try {
+          const { originalWidth, originalHeight } = croppingPageInfo;
+          const { naturalWidth: displayWidth, naturalHeight: displayHeight } = imgRef.current;
 
-        if(pageIndexInDoc === -1) {
-            throw new Error(`Selected page (original index ${croppingPageInfo.originalIndex}) not found in current document state.`);
-        }
+          // Calculate scale factor
+          const scaleX = originalWidth / displayWidth;
+          const scaleY = originalHeight / displayHeight;
 
-        const page = pdfDoc.getPage(pageIndexInDoc);
-        const { originalWidth, originalHeight } = croppingPageInfo; // Use original dimensions from CroppingPageInfo
-        const { naturalWidth: displayWidth, naturalHeight: displayHeight } = imgRef.current; // Displayed size in crop tool
+          // Convert PixelCrop to PDF coordinates (bottom-left origin)
+          let pdfX = completedCrop.x * scaleX;
+          let pdfY = originalHeight - (completedCrop.y + completedCrop.height) * scaleY;
+          let pdfWidth = completedCrop.width * scaleX;
+          let pdfHeight = completedCrop.height * scaleY;
 
-        // Calculate scale factor between displayed image and original PDF page size
-        const scaleX = originalWidth / displayWidth;
-        const scaleY = originalHeight / displayHeight;
+          // Validate calculated values (ensure they are positive and within bounds if necessary)
+          if (pdfWidth <= 0 || pdfHeight <= 0 || pdfX < 0 || pdfY < 0 || (pdfX + pdfWidth > originalWidth) || (pdfY + pdfHeight > originalHeight) ) {
+             console.error("Invalid crop dimensions calculated:", { pdfX, pdfY, pdfWidth, pdfHeight, originalWidth, originalHeight });
+             throw new Error("Calculated crop dimensions are invalid.");
+          }
 
-        // Convert PixelCrop coordinates (relative to displayed image) to PDF coordinates
-        // PDF coordinates origin is bottom-left, PixelCrop origin is top-left
-        let pdfX = completedCrop.x * scaleX;
-        let pdfY = originalHeight - (completedCrop.y + completedCrop.height) * scaleY; // Invert Y and adjust for height
-        let pdfWidth = completedCrop.width * scaleX;
-        let pdfHeight = completedCrop.height * scaleY;
 
-        // Apply the crop box to the page *in the pdfDoc state*
-        page.setCropBox(pdfX, pdfY, pdfWidth, pdfHeight);
+          // Create the cropBox object to store in the UI state
+          const newCropBox: CropBox = { x: pdfX, y: pdfY, width: pdfWidth, height: pdfHeight };
 
-        // Update the cropBox in the main `pages` UI state array as well
-        const newCropBox = { x: pdfX, y: pdfY, width: pdfWidth, height: pdfHeight };
-        setPages(prevPages => prevPages.map((p, i) =>
-             i === croppingPageInfo.index ? { ...p, cropBox: newCropBox, selected: false } : p // Also deselect
-        ));
+          // Update the cropBox in the main `pages` UI state array
+          setPages(prevPages => prevPages.map((p, i) =>
+              i === croppingPageInfo.index ? { ...p, cropBox: newCropBox, selected: false } : p // Also deselect
+          ));
 
-        toast({ title: 'Success', description: `Page ${croppingPageInfo.originalIndex + 1} crop applied.` });
-        setIsCropping(false); // Close the dialog
-        setCroppingPageInfo(null); // Clear cropping info
+          toast({ title: 'Success', description: `Crop parameters for Page ${croppingPageInfo.originalIndex + 1} updated. Save changes to finalize.` });
+          setIsCropping(false); // Close the dialog
+          setCroppingPageInfo(null); // Clear cropping info
 
-    } catch (error) {
-        console.error("Error applying crop:", error);
-        toast({ title: 'Error', description: `Failed to apply crop. ${error instanceof Error ? error.message : ''}`, variant: 'destructive' });
-    } finally {
-        setIsProcessing(false); // Processing finished
-    }
-  };
+      } catch (error) {
+          console.error("Error setting crop state:", error);
+          toast({ title: 'Error', description: `Failed to set crop parameters. ${error instanceof Error ? error.message : ''}`, variant: 'destructive' });
+      } finally {
+          setIsProcessing(false); // Processing finished
+      }
+    };
+
 
   const closeCropDialog = () => {
     setIsCropping(false);
@@ -531,7 +519,23 @@ const PdfEditor: React.FC = () => {
 
        const index = selectedCurrentIndices[0];
        const pageInfo = pages[index];
+
+        // Additional check: Ensure pageInfo exists for the selected index
+        if (!pageInfo) {
+            console.error(`Page info not found for UI index ${index} during preview`);
+            toast({ title: 'Error', description: 'Could not retrieve page information for preview.', variant: 'destructive' });
+            return;
+        }
+
        const originalIndex = pageInfo.id;
+
+       // Add another check: Validate originalIndex before rendering
+        if (typeof originalIndex !== 'number' || originalIndex < 0) {
+            console.error(`Invalid original index (${originalIndex}) for UI index ${index} during preview`);
+            toast({ title: 'Error', description: 'Invalid page index detected for preview.', variant: 'destructive' });
+            return;
+        }
+
 
        setIsProcessing(true); // Use general processing indicator
        try {
@@ -562,7 +566,7 @@ const PdfEditor: React.FC = () => {
 
 
   const areAnyPagesSelected = getSelectedOriginalIndices().length > 0;
-  const isSinglePageSelected = getSelectedOriginalIndices().length === 1;
+  const isSinglePageSelected = getSelectedCurrentIndices().length === 1; // Use current index count
 
 
   return (
@@ -581,7 +585,7 @@ const PdfEditor: React.FC = () => {
         </div>
       )}
 
-      {pdfDoc && pages.length > 0 && !isLoadingPdf && (
+      {file && pages.length > 0 && !isLoadingPdf && ( // Ensure file exists too
         <div className="space-y-4 p-4 border rounded-lg bg-card shadow-sm">
           <div className="flex flex-wrap items-center gap-2 mb-4 border-b pb-4">
              <h3 className="text-lg font-medium mr-auto">Edit Pages ({pages.length})</h3>
@@ -617,12 +621,12 @@ const PdfEditor: React.FC = () => {
                    <AlertDialogHeader>
                      <AlertDialogTitle>Are you sure?</AlertDialogTitle>
                      <AlertDialogDescription>
-                       This action cannot be undone. This will permanently delete the selected {getSelectedOriginalIndices().length} page(s). The document state will be updated, but changes are only final upon saving.
+                       This action cannot be undone. This will mark the selected {getSelectedCurrentIndices().length} page(s) for deletion. Changes are final only upon saving.
                      </AlertDialogDescription>
                    </AlertDialogHeader>
                    <AlertDialogFooter>
                      <AlertDialogCancel>Cancel</AlertDialogCancel>
-                     <AlertDialogAction onClick={deleteSelectedPages} className={buttonVariants({ variant: 'destructive' })}>Delete</AlertDialogAction>
+                     <AlertDialogAction onClick={deleteSelectedPages} className={buttonVariants({ variant: 'destructive' })}>Mark for Deletion</AlertDialogAction>
                    </AlertDialogFooter>
                  </AlertDialogContent>
                </AlertDialog>
@@ -655,7 +659,7 @@ const PdfEditor: React.FC = () => {
                     <span className="text-[10px]">Original: {page.id + 1}</span>
                     <span className="text-[10px]">({page.width.toFixed(0)}x{page.height.toFixed(0)}pt)</span>
                     {page.rotation !== 0 && <span className="text-[10px]">Rotated: {page.rotation}°</span>}
-                    {page.cropBox && <span className="text-[10px] text-blue-600">Cropped</span>}
+                    {page.cropBox && <span className="text-[10px] text-blue-600 font-semibold">Cropped</span>}
 
                      <Checkbox
                         className="absolute top-2 right-2 z-10 bg-background/80 group-hover:opacity-100 opacity-100" // Always show
@@ -694,8 +698,8 @@ const PdfEditor: React.FC = () => {
           </ScrollArea>
 
           <div className="mt-6 flex justify-end">
-            <Button onClick={saveChanges} disabled={isProcessing || isLoadingPdf || !pdfDoc || pages.length === 0 || isCropping} size="lg">
-              {isProcessing ? (
+            <Button onClick={saveChanges} disabled={isProcessing || isLoadingPdf || !file || pages.length === 0 || isCropping} size="lg">
+              {isProcessing && !isLoadingPdf ? ( // Only show saving indicator, not loading PDF indicator
                 <>
                   <Loader2 className="mr-2 h-4 w-4 animate-spin" />
                   Saving Changes...
@@ -712,7 +716,7 @@ const PdfEditor: React.FC = () => {
        <Dialog open={isCropping} onOpenChange={(open) => !open && closeCropDialog()}>
            <DialogContent className="sm:max-w-[90vw] md:max-w-[80vw] lg:max-w-[70vw] xl:max-w-[60vw] h-[85vh] flex flex-col">
              <DialogHeader>
-               <DialogTitle>Crop Page {croppingPageInfo ? croppingPageInfo.originalIndex + 1 : ''}</DialogTitle>
+               <DialogTitle>Set Crop for Page {croppingPageInfo ? croppingPageInfo.originalIndex + 1 : ''}</DialogTitle>
                 {croppingPageInfo && (
                     <p className="text-sm text-muted-foreground">
                         Original Dimensions: {croppingPageInfo.originalWidth.toFixed(0)} x {croppingPageInfo.originalHeight.toFixed(0)} pt
@@ -758,8 +762,8 @@ const PdfEditor: React.FC = () => {
              </div>
                {completedCrop && imgRef.current && (
                    <p className="text-xs text-muted-foreground text-center mt-1">
-                       Crop size: {completedCrop.width.toFixed(0)} x {completedCrop.height.toFixed(0)} px
-                       (at {imgRef.current.naturalWidth} x {imgRef.current.naturalHeight} px display)
+                       Crop selection: {completedCrop.width.toFixed(0)} x {completedCrop.height.toFixed(0)} px
+                       (Display: {imgRef.current.naturalWidth} x {imgRef.current.naturalHeight} px)
                    </p>
                )}
              <DialogFooter className="mt-4">
@@ -768,10 +772,10 @@ const PdfEditor: React.FC = () => {
                 </DialogClose>
                 <Button
                   type="button"
-                  onClick={applyCrop}
+                  onClick={applyCrop} // This now just updates UI state
                   disabled={!completedCrop?.width || !completedCrop?.height || isProcessing || isRenderingCropPreview}
                 >
-                 {isProcessing ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Applying Crop...</> : 'Apply Crop'}
+                 {isProcessing ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" />Applying...</> : 'Apply Crop to State'}
                </Button>
              </DialogFooter>
            </DialogContent>
@@ -782,5 +786,4 @@ const PdfEditor: React.FC = () => {
 };
 
 export default PdfEditor;
-
 
