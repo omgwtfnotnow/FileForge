@@ -6,7 +6,8 @@ import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
-import imageCompression from 'browser-image-compression';
+// browser-image-compression is not used here directly, but might be needed if canvas fails
+// import imageCompression from 'browser-image-compression';
 import { Loader2 } from 'lucide-react';
 
 type OutputFormat = 'jpeg' | 'png' | 'webp';
@@ -24,6 +25,14 @@ const ImageConverter: React.FC = () => {
   }, []);
 
   const handleFileAccepted = (acceptedFile: File) => {
+    // Basic check for HEIC type, although MIME type might be ambiguous
+    if (acceptedFile.type === 'image/heic' || acceptedFile.type === 'image/heif' || acceptedFile.name.toLowerCase().endsWith('.heic') || acceptedFile.name.toLowerCase().endsWith('.heif')) {
+        toast({
+            title: 'HEIC/HEIF Detected',
+            description: 'Browser support for HEIC/HEIF is limited. Conversion may fail.',
+            variant: 'default', // Use default variant for informational messages
+        });
+    }
     setFile(acceptedFile);
   };
 
@@ -37,10 +46,22 @@ const ImageConverter: React.FC = () => {
     setIsProcessing(true);
 
     try {
-      // browser-image-compression doesn't directly convert format in the way we might expect
-      // (like preserving transparency when converting TO jpeg). It primarily compresses.
-      // To truly convert format, we draw the image to a canvas and then export from the canvas.
-      const imageBitmap = await createImageBitmap(file);
+      // Use createImageBitmap which has broader support for decoding various formats, including HEIC in some browsers (like Safari)
+      // Fallback might be needed using a library like heic2any if createImageBitmap fails for HEIC
+      let imageBitmap: ImageBitmap;
+      try {
+          imageBitmap = await createImageBitmap(file);
+      } catch (bitmapError) {
+          console.error("createImageBitmap failed:", bitmapError);
+          // Add more specific error handling if needed, e.g., suggesting a library for HEIC
+          if (file.type.startsWith('image/heic') || file.type.startsWith('image/heif') || file.name.toLowerCase().endsWith('.heic') || file.name.toLowerCase().endsWith('.heif')) {
+             throw new Error('Could not decode HEIC image. Browser support may be lacking. Try converting HEIC to JPG/PNG externally first.');
+          } else {
+             throw new Error('Could not decode image format.');
+          }
+      }
+
+
       const canvas = document.createElement('canvas');
       canvas.width = imageBitmap.width;
       canvas.height = imageBitmap.height;
@@ -51,6 +72,7 @@ const ImageConverter: React.FC = () => {
       }
 
       ctx.drawImage(imageBitmap, 0, 0);
+      imageBitmap.close(); // Close the bitmap to free memory
 
       // Determine the mime type for the target format
       let mimeType: string;
@@ -67,20 +89,20 @@ const ImageConverter: React.FC = () => {
         default:
           mimeType = 'image/jpeg';
           quality = 0.92; // Default quality for JPEG
-          // Fill background with white for JPEG if original was transparent PNG/WebP
-          // Create a temporary canvas to draw the background
-           const bgCanvas = document.createElement('canvas');
-           bgCanvas.width = canvas.width;
-           bgCanvas.height = canvas.height;
-           const bgCtx = bgCanvas.getContext('2d');
-           if (bgCtx) {
-             bgCtx.fillStyle = 'white';
-             bgCtx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
-             bgCtx.drawImage(canvas, 0, 0); // Draw original image on top
-             // Now use bgCanvas for JPEG conversion
-             canvas.width = bgCanvas.width; // Update canvas dimensions just in case
-             canvas.height = bgCanvas.height;
-             ctx.drawImage(bgCanvas, 0, 0); // Draw the combined image back onto the main canvas
+          // Fill background with white for JPEG if original might have transparency (e.g., PNG, WEBP input)
+           if (file.type === 'image/png' || file.type === 'image/webp' || file.type === 'image/gif') {
+             // Create a temporary canvas to draw the background
+             const bgCanvas = document.createElement('canvas');
+             bgCanvas.width = canvas.width;
+             bgCanvas.height = canvas.height;
+             const bgCtx = bgCanvas.getContext('2d');
+             if (bgCtx) {
+               bgCtx.fillStyle = 'white';
+               bgCtx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+               bgCtx.drawImage(canvas, 0, 0); // Draw original image on top
+               // Now use bgCanvas for JPEG conversion
+               ctx.drawImage(bgCanvas, 0, 0); // Draw the combined image back onto the main canvas
+             }
            }
           break;
       }
@@ -89,21 +111,30 @@ const ImageConverter: React.FC = () => {
       canvas.toBlob(
         (blob) => {
           if (!blob) {
-            throw new Error('Canvas to Blob conversion failed');
+            setIsProcessing(false); // Ensure processing stops
+            toast({ title: 'Error', description: 'Canvas to Blob conversion failed.', variant: 'destructive' });
+            return; // Exit early
           }
 
           // Trigger download
-          const link = document.createElement('a');
-          link.href = URL.createObjectURL(blob);
-          const originalName = file.name.replace(/\.[^/.]+$/, "");
-          link.download = `${originalName}.${outputFormat}`;
-          document.body.appendChild(link);
-          link.click();
-          document.body.removeChild(link);
-          URL.revokeObjectURL(link.href);
+          try {
+              const link = document.createElement('a');
+              link.href = URL.createObjectURL(blob);
+              const originalName = file.name.replace(/\.[^/.]+$/, "");
+              link.download = `${originalName}.${outputFormat}`;
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+              URL.revokeObjectURL(link.href); // Clean up object URL
 
-          toast({ title: 'Success', description: `Image converted to ${outputFormat.toUpperCase()} and download started.` });
-          setIsProcessing(false);
+              toast({ title: 'Success', description: `Image converted to ${outputFormat.toUpperCase()} and download started.` });
+          } catch (downloadError) {
+               console.error("Download error:", downloadError);
+               toast({ title: 'Error', description: 'Failed to initiate download.', variant: 'destructive' });
+          } finally {
+               setIsProcessing(false); // Stop processing indicator
+          }
+
         },
         mimeType,
         quality // Pass quality parameter if applicable
@@ -112,22 +143,34 @@ const ImageConverter: React.FC = () => {
     } catch (error) {
       console.error('Image conversion error:', error);
       let description = 'Failed to convert image.';
-      if (error instanceof Error && error.message.includes('Image format is not supported')) {
-         description = 'Input image format is not supported by the browser.';
-      }
+       if (error instanceof Error) {
+           // Use error message if available and informative
+           description = error.message.includes('decode') || error.message.includes('HEIC')
+             ? error.message
+             : 'Failed to convert image.';
+       }
       toast({ title: 'Error', description, variant: 'destructive' });
-      setIsProcessing(false);
+      setIsProcessing(false); // Stop processing indicator on error
     }
-    // Note: canvas.toBlob is async, so setIsProcessing(false) is called inside the callback.
-    // If an error occurs before the callback, it's caught in the catch block.
+    // Note: canvas.toBlob is async. The finally block inside the try...catch handles errors
+    // *before* the toBlob call. The logic *inside* toBlob needs its own finally/error handling
+    // for download issues or blob creation failures.
   };
 
   return (
     <div className="space-y-6">
       <FileUploader
         onFileAccepted={handleFileAccepted}
-        accept={{ 'image/*': ['.jpeg', '.jpg', '.png', '.webp', '.gif', '.bmp'] }} // Accept common image formats
-        label="Drag 'n' drop an image here, or click to select image"
+        accept={{
+          'image/jpeg': ['.jpeg', '.jpg'],
+          'image/png': ['.png'],
+          'image/webp': ['.webp'],
+          'image/gif': ['.gif'],
+          'image/bmp': ['.bmp'],
+          'image/heic': ['.heic'], // Add HEIC
+          'image/heif': ['.heif'], // Add HEIF
+        }}
+        label="Drag 'n' drop an image (JPG, PNG, WEBP, GIF, BMP, HEIC), or click to select"
       />
 
       {file && (
@@ -139,7 +182,7 @@ const ImageConverter: React.FC = () => {
               onValueChange={(value: OutputFormat) => setOutputFormat(value)}
               disabled={isProcessing}
             >
-              <SelectTrigger id="output-format">
+              <SelectTrigger id="output-format" className="w-[180px]">
                 <SelectValue placeholder="Select format" />
               </SelectTrigger>
               <SelectContent>
